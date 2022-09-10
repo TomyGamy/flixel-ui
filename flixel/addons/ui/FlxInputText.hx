@@ -1,5 +1,6 @@
 package flixel.addons.ui;
 
+import lime.system.Clipboard;
 import flash.errors.Error;
 import flash.events.KeyboardEvent;
 import flash.geom.Rectangle;
@@ -12,6 +13,14 @@ import flixel.text.FlxText;
 import flixel.util.FlxColor;
 import flixel.util.FlxDestroyUtil;
 import flixel.util.FlxTimer;
+import flixel.input.mouse.FlxMouseButton;
+import flixel.input.FlxInput;
+import flixel.input.FlxPointer;
+import flixel.input.IFlxInput;
+import openfl.display.BlendMode;
+#if FLX_TOUCH
+import flixel.input.touch.FlxTouch;
+#end
 
 /**
  * FlxInputText v1.11, ported to Haxe
@@ -25,6 +34,8 @@ import flixel.util.FlxTimer;
  * Copyright (c) 2009 Martín Sebastián Wain
  * License: Creative Commons Attribution 3.0 United States
  * @link http://creativecommons.org/licenses/by/3.0/us/
+ * 
+ * Modified by PlankDev to support cut/copy/paste
  */
 class FlxInputText extends FlxText
 {
@@ -42,6 +53,23 @@ class FlxInputText extends FlxText
 	public static inline var DELETE_ACTION:String = "delete"; // press delete
 	public static inline var ENTER_ACTION:String = "enter"; // press enter
 	public static inline var INPUT_ACTION:String = "input"; // manually edit
+	public static inline var PASTE_ACTION:String = "paste"; // text paste
+	public static inline var COPY_ACTION:String = "copy"; // text copy
+	public static inline var CUT_ACTION:String = "cut"; // text copy
+	
+	/**
+	 * Maximum distance a pointer can move to still trigger event handlers.
+	 * If it moves beyond this limit, onOut is triggered.
+	 * Defaults to `Math.POSITIVE_INFINITY` (i.e. no limit).
+	 */
+	 public var maxInputMovement:Float = Math.POSITIVE_INFINITY;
+
+	 #if FLX_MOUSE
+	 /**
+	  * Which mouse buttons can trigger the button - by default only the left mouse button.
+	  */
+	 public var mouseButtons:Array<FlxMouseButtonID> = [FlxMouseButtonID.LEFT];
+	 #end
 
 	/**
 	 * This regular expression will filter out (remove) everything that matches.
@@ -103,6 +131,11 @@ class FlxInputText extends FlxText
 	 * The position of the selection cursor. An index of 0 means the carat is before the character at index 0.
 	 */
 	public var caretIndex(default, set):Int = 0;
+
+	/**
+	 * The position of the start or selection. An index of 0 means the start is before the character at index 0.
+	 */
+	public var selIndex:Int = 0;
 
 	/**
 	 * callback that is triggered when this text field gets focus
@@ -169,6 +202,16 @@ class FlxInputText extends FlxText
 	private var caret:FlxSprite;
 
 	/**
+	 * A FlxSprite representing the selectionBox when editing text.
+	 */
+	private var selBox:FlxSprite;
+	
+	/**
+	 * The color of the selected text.
+	 */
+	// public var selColor(default, set):Int = FlxColor.WHITE;
+
+	/**
 	 * A FlxSprite representing the fieldBorders.
 	 */
 	private var fieldBorderSprite:FlxSprite;
@@ -213,6 +256,10 @@ class FlxInputText extends FlxText
 		caret = new FlxSprite();
 		caret.makeGraphic(caretWidth, Std.int(size + 2));
 		_caretTimer = new FlxTimer();
+
+		selBox = new FlxSprite();
+		selBox.makeGraphic(1, Std.int(size + 2), 0xFF0044FF);
+		selBox.blend = SCREEN;
 
 		caretIndex = 0;
 		hasFocus = false;
@@ -277,6 +324,7 @@ class FlxInputText extends FlxText
 		}
 
 		drawSprite(caret);
+		drawSprite(selBox);
 	}
 
 	/**
@@ -305,18 +353,32 @@ class FlxInputText extends FlxText
 		if (FlxG.mouse.justPressed)
 		{
 			var hadFocus:Bool = hasFocus;
-			if (FlxG.mouse.overlaps(this))
+			if (checkMouseOverlap())
 			{
+				if (!hadFocus)
+				{
+					hasFocus = true;
+					if (focusGained != null)
+						focusGained();
+				}
 				caretIndex = getCaretIndex();
-				hasFocus = true;
-				if (!hadFocus && focusGained != null)
-					focusGained();
+				if (!FlxG.keys.pressed.SHIFT)
+					selIndex = caretIndex;
+				updateSelBox(caretIndex);
 			}
 			else
 			{
 				hasFocus = false;
 				if (hadFocus && focusLost != null)
 					focusLost();
+			}
+		}
+		if(hasFocus)
+		{
+			if ((FlxG.mouse.pressed && FlxG.mouse.justMoved))
+			{
+				caretIndex = getCaretIndex();
+				updateSelBox(caretIndex);
 			}
 		}
 		#end
@@ -331,6 +393,105 @@ class FlxInputText extends FlxText
 
 		if (hasFocus)
 		{
+			//// Crtl/Cmd + A to select all
+			
+			#if (macos)
+			if (key == 65 && e.commandKey) {
+			#else
+			if (key == 65 && e.ctrlKey) {
+			#end
+			   	selIndex = 0;
+				caretIndex = text.length;
+
+				updateSelBox(caretIndex);
+
+				// Stops the function to go further, because it whoud type in a a to the input
+				return;
+			}
+			  
+			//// Crtl/Cmd + C to copy text to the clipboard
+			// This is TomyGamy. IDK who wrote this just bellow, but I made it!
+			// This copies the entire input, because i'm too lazy to do caret selection, and if i did it i whoud probabbly make it a pr in flixel-ui. 
+
+			#if (macos)
+			if (key == 67 && e.commandKey) {
+			#else
+			if (key == 67 && e.ctrlKey) {
+			#end
+				if (caretIndex == selIndex)
+					Clipboard.text = text;
+				else
+				{
+					var daMax:Int = Std.int(Math.max(selIndex, caretIndex));
+					var daMin:Int = Std.int(Math.min(selIndex, caretIndex));
+					Clipboard.text = text.substring(daMin, daMax);
+				}
+
+				updateSelBox(caretIndex);
+				onChange(COPY_ACTION);
+
+				// Same as before, but prevents typing out a v
+				return;
+			}
+
+			//// Crtl/Cmd + V to paste in the clipboard text to the input
+			#if (macos)
+			if (key == 86 && e.commandKey) {
+			#else
+			if (key == 86 && e.ctrlKey) {
+			#end
+				var newText:String = filter(Clipboard.text);
+				var daMax:Int = Std.int(Math.max(selIndex, caretIndex));
+				var daMin:Int = Std.int(Math.min(selIndex, caretIndex));
+
+				if (newText.length > 0 && (maxLength == 0 || (text.length + newText.length - daMax + daMin) < maxLength)) {
+					if (selIndex != caretIndex)
+					{
+						text = text.substring(0, daMin) + text.substring(daMax);
+						selIndex = caretIndex = daMin;
+					}
+					text = insertSubstring(text, newText, caretIndex);
+					caretIndex += newText.length;
+					selIndex = caretIndex;
+					updateSelBox(caretIndex);
+					onChange(INPUT_ACTION);
+					onChange(PASTE_ACTION);
+				}
+
+				// Same as before, but prevents typing out a v
+				return;
+			}
+
+			//// Crtl/Cmd + X to cut the text from the input to the clipboard
+			// Again, this copies the entire input text because there is no caret selection.
+			#if (macos)
+			if (key == 88 && e.commandKey) {
+			#else
+			if (key == 88 && e.ctrlKey) {
+			#end
+				if (selIndex == caretIndex)
+				{
+					Clipboard.text = text;
+					text = '';
+					selIndex = caretIndex = 0;
+				}
+				else
+				{
+					var daMax:Int = Std.int(Math.max(selIndex, caretIndex));
+					var daMin:Int = Std.int(Math.min(selIndex, caretIndex));
+					Clipboard.text = text.substring(daMin, daMax);
+					text = text.substring(0, daMin) + text.substring(daMax);
+					selIndex = caretIndex = daMin;
+				}
+
+				updateSelBox(caretIndex);
+				onChange(INPUT_ACTION);
+				onChange(CUT_ACTION);
+
+				// Same as before, but prevents typing out a x
+				return;
+			}
+
 			// Do nothing for Shift, Ctrl, Esc, and flixel console hotkey
 			if (key == 16 || key == 17 || key == 220 || key == 27)
 			{
@@ -339,37 +500,49 @@ class FlxInputText extends FlxText
 			// Left arrow
 			else if (key == 37)
 			{
-				if (caretIndex > 0)
+				if (caretIndex != selIndex && !e.shiftKey)
+				{
+					selIndex = caretIndex = Std.int(Math.min(selIndex, caretIndex));
+				}
+				else if (caretIndex > 0)
 				{
 					caretIndex--;
-					text = text; // forces scroll update
 				}
 			}
 			// Right arrow
 			else if (key == 39)
 			{
-				if (caretIndex < text.length)
+				if (caretIndex != selIndex && !e.shiftKey)
+				{
+					selIndex = caretIndex = Std.int(Math.max(selIndex, caretIndex));
+				}
+				else if (caretIndex < text.length)
 				{
 					caretIndex++;
-					text = text; // forces scroll update
 				}
 			}
 			// End key
 			else if (key == 35)
 			{
-				caretIndex = text.length;
-				text = text; // forces scroll update
+				selIndex = caretIndex = text.length;
 			}
 			// Home key
 			else if (key == 36)
 			{
-				caretIndex = 0;
-				text = text;
+				selIndex = caretIndex = 0;
 			}
 			// Backspace
 			else if (key == 8)
-			{
-				if (caretIndex > 0)
+			{	
+				if (caretIndex != selIndex)
+				{
+					var daMax:Int = Std.int(Math.max(selIndex, caretIndex));
+					var daMin:Int = Std.int(Math.min(selIndex, caretIndex));
+					text = text.substring(0, daMin) + text.substring(daMax);
+					selIndex = caretIndex = daMin;
+					onChange(BACKSPACE_ACTION);
+				}
+				else if (caretIndex > 0)
 				{
 					caretIndex--;
 					text = text.substring(0, caretIndex) + text.substring(caretIndex + 1);
@@ -379,7 +552,15 @@ class FlxInputText extends FlxText
 			// Delete
 			else if (key == 46)
 			{
-				if (text.length > 0 && caretIndex < text.length)
+				if (caretIndex != selIndex)
+				{
+					var daMax:Int = Std.int(Math.max(selIndex, caretIndex));
+					var daMin:Int = Std.int(Math.min(selIndex, caretIndex));
+					text = text.substring(0, daMin) + text.substring(daMax);
+					selIndex = caretIndex = daMin;
+					onChange(DELETE_ACTION);
+				}
+				else if (text.length > 0 && caretIndex < text.length)
 				{
 					text = text.substring(0, caretIndex) + text.substring(caretIndex + 1);
 					onChange(DELETE_ACTION);
@@ -397,6 +578,13 @@ class FlxInputText extends FlxText
 				{
 					return;
 				}
+				if (caretIndex != selIndex)
+				{
+					var daMax:Int = Std.int(Math.max(selIndex, caretIndex));
+					var daMin:Int = Std.int(Math.min(selIndex, caretIndex));
+					text = text.substring(0, daMin) + text.substring(daMax);
+					selIndex = caretIndex = daMin;
+				}
 				var newText:String = filter(String.fromCharCode(e.charCode));
 
 				if (newText.length > 0 && (maxLength == 0 || (text.length + newText.length) < maxLength))
@@ -406,6 +594,11 @@ class FlxInputText extends FlxText
 					onChange(INPUT_ACTION);
 				}
 			}
+
+			if(!e.shiftKey)
+				selIndex = caretIndex;
+			text = text; // forces scroll update
+			updateSelBox(caretIndex);
 		}
 	}
 
@@ -446,7 +639,7 @@ class FlxInputText extends FlxText
 	private function getCaretIndex():Int
 	{
 		#if FLX_MOUSE
-		var hit = FlxPoint.get(FlxG.mouse.x - x, FlxG.mouse.y - y);
+		var hit = FlxPoint.get(FlxG.mouse.getWorldPosition(camera, _point).x - x, FlxG.mouse.getWorldPosition(camera, _point).y - y);
 		return getCharIndexAtPoint(hit.x, hit.y);
 		#else
 		return 0;
@@ -842,31 +1035,39 @@ class FlxInputText extends FlxText
 		}
 		return alignStr;
 	}
+	
+	public var offx(get, default):Float = 0;
 
-	private function set_caretIndex(newCaretIndex:Int):Int
+	private function get_offx():Float
 	{
-		var offx:Float = 0;
+		var tempOffx:Float = 0;
 
 		var alignStr:FlxTextAlign = getAlignStr();
 
 		switch (alignStr)
 		{
 			case RIGHT:
-				offx = textField.width - 2 - textField.textWidth - 2;
-				if (offx < 0)
-					offx = 0; // hack, fix negative offset.
+				tempOffx = textField.width - 2 - textField.textWidth - 2;
+				if (tempOffx < 0)
+					tempOffx = 0; // hack, fix negative offset.
 
 			case CENTER:
 				#if !js
-				offx = (textField.width - 2 - textField.textWidth) / 2 + textField.scrollH / 2;
+				tempOffx = (textField.width - 2 - textField.textWidth) / 2 + textField.scrollH / 2;
 				#end
-				if (offx <= 1)
-					offx = 0; // hack, fix ofset rounding alignment.
+				if (tempOffx <= 1)
+					tempOffx = 0; // hack, fix ofset rounding alignment.
 
 			default:
-				offx = 0;
+				tempOffx = 0;
 		}
 
+		offx = tempOffx;
+		return offx;
+	}
+
+	private function set_caretIndex(newCaretIndex:Int):Int
+	{
 		caretIndex = newCaretIndex;
 
 		// If caret is too far to the right something is wrong
@@ -920,6 +1121,50 @@ class FlxInputText extends FlxText
 		}
 
 		return caretIndex;
+	}
+
+	private function updateSelBox(curIndex:Int)
+	{
+		// Caret is OK, proceed to position
+		if (selIndex != -1 && curIndex != -1)
+		{
+			var boundaries:Rectangle = getCharBoundaries(selIndex);
+
+			if(selIndex == curIndex)	
+			{
+				selBox.visible = false;
+			}
+			else {
+				var curPos:Float = getCharBoundaries(curIndex).left;
+				if (curIndex >= text.length)
+					curPos = getCharBoundaries(curIndex).right;
+
+				var selPos:Float = boundaries.left;
+				if (selIndex >= text.length)
+					selPos = boundaries.right;
+
+				selBox.visible = true;
+				var selWidth:Int = Std.int(Math.abs(selPos - curPos));
+				if (selWidth > fieldWidth)
+					selWidth = Std.int(fieldWidth);
+				selBox.setGraphicSize(selWidth, Std.int(size + 2));
+				selBox.updateHitbox();
+			}
+
+			if (selIndex < curIndex)
+			{
+				if (boundaries != null)
+				{
+					selBox.x = offx + boundaries.left + x;
+					selBox.y = boundaries.top + y;
+				}
+			}
+			else if (selIndex > curIndex)
+			{
+				selBox.x = caret.x;
+				selBox.y = caret.y;
+			}
+		}
 	}
 
 	private function set_forceCase(Value:Int):Int
@@ -1005,5 +1250,49 @@ class FlxInputText extends FlxText
 		backgroundColor = Value;
 		calcFrame();
 		return backgroundColor;
+	}
+	
+
+	function checkMouseOverlap():Bool
+	{
+		var overlap = false;
+		#if FLX_MOUSE
+		for (camera in cameras)
+		{
+			for (buttonID in mouseButtons)
+			{
+				var button = FlxMouseButton.getByID(buttonID);
+				if (button != null && checkInput(FlxG.mouse, button, button.justPressedPosition, camera))
+				{
+					overlap = true;
+				}
+			}
+		}
+		#end
+		return overlap;
+	}
+
+	function checkTouchOverlap():Bool
+	{
+		var overlap = false;
+		#if FLX_TOUCH
+		for (camera in cameras)
+		{
+			for (touch in FlxG.touches.list)
+			{
+				if (checkInput(touch, touch, touch.justPressedPosition, camera))
+				{
+					overlap = true;
+				}
+			}
+		}
+		#end
+		return overlap;
+	}
+	
+
+	function checkInput(pointer:FlxPointer, input:IFlxInput, justPressedPosition:FlxPoint, camera:FlxCamera):Bool
+	{
+		return overlapsPoint(pointer.getWorldPosition(camera, _point), true, camera);
 	}
 }
